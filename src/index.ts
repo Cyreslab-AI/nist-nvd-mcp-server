@@ -81,6 +81,225 @@ interface NVDResponse {
   cveChanges?: any[];
 }
 
+// JSON Schema for a single summarized CVE entry, as produced by formatCVEResponse().
+const CVE_SUMMARY_ITEM_SCHEMA = {
+  type: "object",
+  properties: {
+    cve_id: { type: "string" },
+    status: { type: "string" },
+    published: { type: "string" },
+    last_modified: { type: "string" },
+    description: { type: "string" },
+    cvss: {
+      type: "object",
+      properties: {
+        v3_score: { type: ["number", "null"] },
+        v3_severity: { type: ["string", "null"] },
+        v2_score: { type: ["number", "null"] },
+      },
+    },
+    weaknesses: {
+      type: "array",
+      items: { type: "string" },
+      description: "First 5 CWE IDs associated with the CVE",
+    },
+    reference_count: { type: "number" },
+    cisa_kev: {
+      type: ["object", "null"],
+      properties: {
+        exploitAdd: { type: "string" },
+        actionDue: { type: "string" },
+        requiredAction: { type: "string" },
+        vulnerabilityName: { type: "string" },
+      },
+    },
+    configurations_count: { type: "number" },
+  },
+  required: [
+    "cve_id",
+    "status",
+    "published",
+    "last_modified",
+    "description",
+    "cvss",
+    "weaknesses",
+    "reference_count",
+    "configurations_count",
+  ],
+};
+
+// JSON Schema shared by every tool that returns a paginated list of CVEs
+// (search_cves, search_cves_by_cpe, search_cves_by_cvss, search_recent_cves,
+// search_modified_cves, search_high_priority_cves), matching formatCVEResponse().
+const CVE_LIST_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: {
+      type: "object",
+      properties: {
+        search_context: { type: "string" },
+        total_results: { type: "number" },
+        showing_results: { type: "number" },
+        results_per_page: { type: "number" },
+        start_index: { type: "number" },
+        timestamp: { type: "string" },
+      },
+      required: [
+        "search_context",
+        "total_results",
+        "showing_results",
+        "results_per_page",
+        "start_index",
+        "timestamp",
+      ],
+    },
+    vulnerabilities: {
+      type: "array",
+      items: CVE_SUMMARY_ITEM_SCHEMA,
+    },
+    raw_response_metadata: {
+      type: "object",
+      properties: {
+        format: { type: "string" },
+        version: { type: "string" },
+        has_more_results: { type: "boolean" },
+      },
+      required: ["format", "version", "has_more_results"],
+    },
+  },
+  required: ["summary", "vulnerabilities", "raw_response_metadata"],
+};
+
+// JSON Schema for get_cve, matching the detailed formattedResponse built in getCVE().
+const CVE_DETAIL_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    cve_id: { type: "string" },
+    status: { type: "string" },
+    published: { type: "string" },
+    last_modified: { type: "string" },
+    source_identifier: { type: "string" },
+    descriptions: {
+      type: "array",
+      items: { type: "object" },
+      description: "Raw NVD description objects ({lang, value})",
+    },
+    metrics: {
+      type: "object",
+      description:
+        "Raw NVD metrics object (cvssMetricV2/V30/V31 arrays, as provided by the API)",
+    },
+    weaknesses: {
+      type: "array",
+      items: { type: "object" },
+      description: "Raw NVD weaknesses (CWE) entries",
+    },
+    configurations: {
+      type: "array",
+      items: { type: "object" },
+      description: "Raw NVD configuration/CPE match entries",
+    },
+    references: {
+      type: "array",
+      items: { type: "object" },
+      description: "Raw NVD reference entries",
+    },
+    vendor_comments: {
+      type: "array",
+      items: { type: "object" },
+    },
+    cisa_kev_info: {
+      type: ["object", "null"],
+      properties: {
+        exploit_add_date: { type: "string" },
+        action_due_date: { type: "string" },
+        required_action: { type: "string" },
+        vulnerability_name: { type: "string" },
+      },
+    },
+    raw_data: {
+      type: "object",
+      description: "Full raw NVD API vulnerability record for this CVE",
+    },
+  },
+  required: [
+    "cve_id",
+    "status",
+    "published",
+    "last_modified",
+    "descriptions",
+    "metrics",
+    "weaknesses",
+    "configurations",
+    "references",
+    "raw_data",
+  ],
+};
+
+// JSON Schema for get_cve_change_history, matching formatChangeHistoryResponse().
+const CVE_CHANGE_HISTORY_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: {
+      type: "object",
+      properties: {
+        search_context: { type: "string" },
+        total_changes: { type: "number" },
+        showing_changes: { type: "number" },
+        results_per_page: { type: "number" },
+        start_index: { type: "number" },
+        timestamp: { type: "string" },
+      },
+      required: [
+        "search_context",
+        "total_changes",
+        "showing_changes",
+        "results_per_page",
+        "start_index",
+        "timestamp",
+      ],
+    },
+    changes: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          cve_id: { type: "string" },
+          event_name: { type: "string" },
+          change_id: { type: "string" },
+          source: { type: "string" },
+          created: { type: "string" },
+          details_count: { type: "number" },
+          sample_details: {
+            type: "array",
+            items: { type: "object" },
+            description: "First 3 raw change detail entries",
+          },
+        },
+        required: [
+          "cve_id",
+          "event_name",
+          "change_id",
+          "source",
+          "created",
+          "details_count",
+          "sample_details",
+        ],
+      },
+    },
+    raw_response_metadata: {
+      type: "object",
+      properties: {
+        format: { type: "string" },
+        version: { type: "string" },
+        has_more_results: { type: "boolean" },
+      },
+      required: ["format", "version", "has_more_results"],
+    },
+  },
+  required: ["summary", "changes", "raw_response_metadata"],
+};
+
 class NISTNVDServer {
   private server: Server;
   private axiosInstance: AxiosInstance;
@@ -267,6 +486,8 @@ class NISTNVDServer {
               },
             },
           },
+          annotations: { readOnlyHint: true, openWorldHint: true },
+          outputSchema: CVE_LIST_OUTPUT_SCHEMA,
         },
         {
           name: "get_cve",
@@ -283,6 +504,8 @@ class NISTNVDServer {
             },
             required: ["cveId"],
           },
+          annotations: { readOnlyHint: true, openWorldHint: true },
+          outputSchema: CVE_DETAIL_OUTPUT_SCHEMA,
         },
         {
           name: "search_cves_by_cpe",
@@ -334,6 +557,8 @@ class NISTNVDServer {
               },
             },
           },
+          annotations: { readOnlyHint: true, openWorldHint: true },
+          outputSchema: CVE_LIST_OUTPUT_SCHEMA,
         },
         {
           name: "search_cves_by_cvss",
@@ -379,6 +604,8 @@ class NISTNVDServer {
               },
             },
           },
+          annotations: { readOnlyHint: true, openWorldHint: true },
+          outputSchema: CVE_LIST_OUTPUT_SCHEMA,
         },
         {
           name: "search_recent_cves",
@@ -411,6 +638,8 @@ class NISTNVDServer {
               },
             },
           },
+          annotations: { readOnlyHint: true, openWorldHint: true },
+          outputSchema: CVE_LIST_OUTPUT_SCHEMA,
         },
         {
           name: "search_modified_cves",
@@ -444,6 +673,8 @@ class NISTNVDServer {
               },
             },
           },
+          annotations: { readOnlyHint: true, openWorldHint: true },
+          outputSchema: CVE_LIST_OUTPUT_SCHEMA,
         },
         {
           name: "get_cve_change_history",
@@ -496,6 +727,8 @@ class NISTNVDServer {
               },
             },
           },
+          annotations: { readOnlyHint: true, openWorldHint: true },
+          outputSchema: CVE_CHANGE_HISTORY_OUTPUT_SCHEMA,
         },
         {
           name: "search_high_priority_cves",
@@ -546,6 +779,8 @@ class NISTNVDServer {
               },
             },
           },
+          annotations: { readOnlyHint: true, openWorldHint: true },
+          outputSchema: CVE_LIST_OUTPUT_SCHEMA,
         },
       ],
     }));
@@ -810,6 +1045,7 @@ class NISTNVDServer {
           text: JSON.stringify(formattedResponse, null, 2),
         },
       ],
+      structuredContent: formattedResponse,
     };
   }
 
@@ -865,6 +1101,7 @@ class NISTNVDServer {
           text: JSON.stringify(formattedResponse, null, 2),
         },
       ],
+      structuredContent: formattedResponse,
     };
   }
 
@@ -974,6 +1211,7 @@ class NISTNVDServer {
           text: JSON.stringify(formattedResponse, null, 2),
         },
       ],
+      structuredContent: formattedResponse,
     };
   }
 
