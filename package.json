@@ -1,6 +1,6 @@
 {
   "name": "@cyreslab/nist-nvd-mcp-server",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "description": "MCP server for accessing NIST NVD (National Vulnerability Database) API - search CVE data, vulnerabilities, and security information",
   "main": "build/index.js",

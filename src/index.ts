@@ -1,18 +1,25 @@
 #!/usr/bin/env node
 
 /**
- * NIST NVD MCP Server v1.0.0
+ * NIST NVD MCP Server v1.1.0
  *
  * This MCP server provides access to the NIST National Vulnerability Database (NVD) API which contains:
  * - Common Vulnerabilities and Exposures (CVE) data with comprehensive filtering
  * - CVE change history tracking for transparency and monitoring
  * - CVSS scoring (v2, v3, v4) and severity-based filtering
  * - CPE-based product vulnerability searches
+ * - CPE Dictionary and CPE Match Criteria lookups
  * - CISA Known Exploited Vulnerabilities (KEV) integration
  * - CERT alerts and vulnerability notes
  *
- * The NIST NVD API is free to use but has rate limits. No API key is required.
+ * The NIST NVD API is free to use but has rate limits:
+ *   - 5 requests / 30 seconds without an API key
+ *   - 50 requests / 30 seconds with a free API key
+ * Set the NVD_API_KEY environment variable to use a key (optional, strongly recommended).
+ * Request one at: https://nvd.nist.gov/developers/request-an-api-key
+ *
  * API documentation: https://nvd.nist.gov/developers/vulnerabilities
+ *                     https://nvd.nist.gov/developers/products
  */
 
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
@@ -41,6 +48,7 @@ interface NVDSearchParams {
   hasOval?: boolean;
   isVulnerable?: boolean;
   noRejected?: boolean;
+  cveTag?: string;
   pubStartDate?: string;
   pubEndDate?: string;
   lastModStartDate?: string;
@@ -64,6 +72,29 @@ interface NVDChangeHistoryParams {
   startIndex?: number;
 }
 
+// Params for the CPE Dictionary API (/rest/json/cpes/2.0)
+interface NVDCPESearchParams {
+  cpeNameId?: string;
+  cpeMatchString?: string;
+  keywordSearch?: string;
+  keywordExactMatch?: boolean;
+  matchCriteriaId?: string;
+  lastModStartDate?: string;
+  lastModEndDate?: string;
+  resultsPerPage?: number;
+  startIndex?: number;
+}
+
+// Params for the CPE Match Criteria API (/rest/json/cpematch/2.0)
+interface NVDCPEMatchParams {
+  matchCriteriaId?: string;
+  cveId?: string;
+  lastModStartDate?: string;
+  lastModEndDate?: string;
+  resultsPerPage?: number;
+  startIndex?: number;
+}
+
 interface CacheEntry {
   data: any;
   timestamp: number;
@@ -79,6 +110,8 @@ interface NVDResponse {
   timestamp: string;
   vulnerabilities?: any[];
   cveChanges?: any[];
+  products?: any[];
+  matchStrings?: any[];
 }
 
 // JSON Schema for a single summarized CVE entry, as produced by formatCVEResponse().
@@ -300,6 +333,142 @@ const CVE_CHANGE_HISTORY_OUTPUT_SCHEMA = {
   required: ["summary", "changes", "raw_response_metadata"],
 };
 
+// JSON Schema for search_cpe_dictionary, matching formatCPEResponse().
+const CPE_LIST_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: {
+      type: "object",
+      properties: {
+        search_context: { type: "string" },
+        total_results: { type: "number" },
+        showing_results: { type: "number" },
+        results_per_page: { type: "number" },
+        start_index: { type: "number" },
+        timestamp: { type: "string" },
+      },
+      required: [
+        "search_context",
+        "total_results",
+        "showing_results",
+        "results_per_page",
+        "start_index",
+        "timestamp",
+      ],
+    },
+    products: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          cpe_name: { type: "string" },
+          cpe_name_id: { type: "string" },
+          deprecated: { type: "boolean" },
+          last_modified: { type: "string" },
+          created: { type: "string" },
+          titles: {
+            type: "array",
+            items: { type: "object" },
+            description: "Raw NVD title entries ({title, lang})",
+          },
+          refs: {
+            type: "array",
+            items: { type: "object" },
+            description: "Raw NVD reference entries ({ref, type})",
+          },
+          deprecated_by: {
+            type: "array",
+            items: { type: "object" },
+            description: "CPE names that deprecate this one, if any",
+          },
+        },
+        required: [
+          "cpe_name",
+          "cpe_name_id",
+          "deprecated",
+          "last_modified",
+          "created",
+        ],
+      },
+    },
+    raw_response_metadata: {
+      type: "object",
+      properties: {
+        format: { type: "string" },
+        version: { type: "string" },
+        has_more_results: { type: "boolean" },
+      },
+      required: ["format", "version", "has_more_results"],
+    },
+  },
+  required: ["summary", "products", "raw_response_metadata"],
+};
+
+// JSON Schema for search_cpe_match_criteria, matching formatCPEMatchResponse().
+const CPE_MATCH_LIST_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: {
+      type: "object",
+      properties: {
+        search_context: { type: "string" },
+        total_results: { type: "number" },
+        showing_results: { type: "number" },
+        results_per_page: { type: "number" },
+        start_index: { type: "number" },
+        timestamp: { type: "string" },
+      },
+      required: [
+        "search_context",
+        "total_results",
+        "showing_results",
+        "results_per_page",
+        "start_index",
+        "timestamp",
+      ],
+    },
+    match_criteria: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          match_criteria_id: { type: "string" },
+          criteria: { type: "string" },
+          status: { type: "string" },
+          created: { type: "string" },
+          last_modified: { type: "string" },
+          cpe_last_modified: { type: "string" },
+          matches_count: { type: "number" },
+          sample_matches: {
+            type: "array",
+            items: { type: "object" },
+            description: "First 5 raw CPE name matches ({cpeName, cpeNameId})",
+          },
+        },
+        required: [
+          "match_criteria_id",
+          "criteria",
+          "status",
+          "created",
+          "last_modified",
+          "matches_count",
+          "sample_matches",
+        ],
+      },
+    },
+    raw_response_metadata: {
+      type: "object",
+      properties: {
+        format: { type: "string" },
+        version: { type: "string" },
+        has_more_results: { type: "boolean" },
+      },
+      required: ["format", "version", "has_more_results"],
+    },
+  },
+  required: ["summary", "match_criteria", "raw_response_metadata"],
+};
+
 class NISTNVDServer {
   private server: Server;
   private axiosInstance: AxiosInstance;
@@ -313,7 +482,7 @@ class NISTNVDServer {
     this.server = new Server(
       {
         name: "nist-nvd-mcp-server",
-        version: "1.0.0",
+        version: "1.1.0",
       },
       {
         capabilities: {
@@ -322,13 +491,37 @@ class NISTNVDServer {
       },
     );
 
-    // NIST NVD API configuration
+    // NIST NVD API configuration.
+    // An API key is optional but strongly recommended: it raises the rate limit
+    // from 5 requests/30s to 50 requests/30s. Get a free key at
+    // https://nvd.nist.gov/developers/request-an-api-key
+    const apiKey = process.env.NVD_API_KEY;
+    const headers: Record<string, string> = {
+      "User-Agent": "NIST-NVD-MCP-Server/1.1.0",
+      Accept: "application/json",
+    };
+    if (apiKey) {
+      headers["apiKey"] = apiKey;
+    } else {
+      console.error(
+        "[nist-nvd-mcp-server] No NVD_API_KEY set. Running unauthenticated " +
+          "(5 requests/30s limit). Set NVD_API_KEY for a higher limit " +
+          "(50 requests/30s) — see https://nvd.nist.gov/developers/request-an-api-key",
+      );
+    }
+
     this.axiosInstance = axios.create({
       baseURL: "https://services.nvd.nist.gov/rest/json",
       timeout: 30000,
-      headers: {
-        "User-Agent": "NIST-NVD-MCP-Server/1.0.0",
-        Accept: "application/json",
+      headers,
+      // NVD's API requires boolean "flag" params (hasKev, hasCertAlerts, hasOval,
+      // isVulnerable, keywordExactMatch, noRejected, ...) to be sent as bare flags
+      // with NO value at all (e.g. "?hasKev"), never as "?hasKev=true". Sending a
+      // value causes NVD to 404. Axios's default serializer would emit
+      // "hasKev=true", so every request goes through this custom serializer instead.
+      paramsSerializer: {
+        serialize: (params: Record<string, any>) =>
+          this.serializeNVDParams(params),
       },
     });
 
@@ -343,6 +536,22 @@ class NISTNVDServer {
 
     // Clean up cache periodically
     setInterval(() => this.cleanupCache(), 60000); // Every minute
+  }
+
+  // Serializes query params for NVD's API. Boolean `true` values are emitted as
+  // bare flags with no "=value" (NVD requires this — see constructor comment).
+  // `false`/`null`/`undefined` values are omitted entirely.
+  private serializeNVDParams(params: Record<string, any>): string {
+    const parts: string[] = [];
+    for (const [key, value] of Object.entries(params)) {
+      if (value === undefined || value === null || value === false) continue;
+      if (value === true) {
+        parts.push(encodeURIComponent(key));
+      } else {
+        parts.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
+      }
+    }
+    return parts.join("&");
   }
 
   private cleanupCache() {
@@ -449,9 +658,28 @@ class NISTNVDServer {
                 description:
                   "If true, only return CVEs with CERT/CC Vulnerability Notes",
               },
+              hasOval: {
+                type: "boolean",
+                description:
+                  "If true, only return CVEs with an associated OVAL (Open Vulnerability and Assessment Language) query",
+              },
               noRejected: {
                 type: "boolean",
                 description: "If true, exclude rejected CVEs from results",
+              },
+              sourceIdentifier: {
+                type: "string",
+                description:
+                  'Filter by the organization that reported/manages the CVE (e.g., "cve@mitre.org", "security-advisories@github.com")',
+              },
+              cveTag: {
+                type: "string",
+                enum: [
+                  "disputed",
+                  "unsupported-when-assigned",
+                  "exclusively-hosted-service",
+                ],
+                description: "Filter by CVE tag applied by the assigning CNA",
               },
               pubStartDate: {
                 type: "string",
@@ -782,6 +1010,109 @@ class NISTNVDServer {
           annotations: { readOnlyHint: true, openWorldHint: true },
           outputSchema: CVE_LIST_OUTPUT_SCHEMA,
         },
+        {
+          name: "search_cpe_dictionary",
+          description:
+            "Browse or search the official CPE (Common Platform Enumeration) Dictionary to find canonical product/version identifiers",
+          inputSchema: {
+            type: "object",
+            properties: {
+              cpeNameId: {
+                type: "string",
+                description:
+                  "Return a specific CPE record by its UUID (e.g., \"82F877C8-FC1D-4790-A6AC-FC89556011C5\")",
+              },
+              cpeMatchString: {
+                type: "string",
+                description:
+                  'CPE match string in CPEv2.3 format to search the dictionary (e.g., "cpe:2.3:a:apache:log4j")',
+              },
+              keywordSearch: {
+                type: "string",
+                description:
+                  'Search for keywords in CPE titles/references (e.g., "log4j", "Microsoft Windows 10")',
+              },
+              keywordExactMatch: {
+                type: "boolean",
+                description:
+                  "If true, search for exact phrase match (requires keywordSearch)",
+              },
+              matchCriteriaId: {
+                type: "string",
+                description:
+                  "Return CPEs associated with a specific CPE Match Criteria UUID",
+              },
+              lastModStartDate: {
+                type: "string",
+                description:
+                  "Start date for last modification range (ISO-8601 format, max 120 day range)",
+              },
+              lastModEndDate: {
+                type: "string",
+                description:
+                  "End date for last modification range (ISO-8601 format, required if lastModStartDate used)",
+              },
+              resultsPerPage: {
+                type: "number",
+                description:
+                  "Number of results per page (1-10000, default: 20)",
+                minimum: 1,
+                maximum: 10000,
+              },
+              startIndex: {
+                type: "number",
+                description: "Starting index for pagination (0-based)",
+                minimum: 0,
+              },
+            },
+          },
+          annotations: { readOnlyHint: true, openWorldHint: true },
+          outputSchema: CPE_LIST_OUTPUT_SCHEMA,
+        },
+        {
+          name: "search_cpe_match_criteria",
+          description:
+            "Search the CPE Match Criteria API to see the version-range matching rules NVD uses to link CVEs to CPEs",
+          inputSchema: {
+            type: "object",
+            properties: {
+              matchCriteriaId: {
+                type: "string",
+                description: "Return a specific Match Criteria record by its UUID",
+              },
+              cveId: {
+                type: "string",
+                description:
+                  'Return match criteria referenced by a specific CVE (e.g., "CVE-2021-44228")',
+                pattern: "^CVE-\\d{4}-\\d{4,}$",
+              },
+              lastModStartDate: {
+                type: "string",
+                description:
+                  "Start date for last modification range (ISO-8601 format, max 120 day range)",
+              },
+              lastModEndDate: {
+                type: "string",
+                description:
+                  "End date for last modification range (ISO-8601 format, required if lastModStartDate used)",
+              },
+              resultsPerPage: {
+                type: "number",
+                description:
+                  "Number of results per page (1-5000, default: 20)",
+                minimum: 1,
+                maximum: 5000,
+              },
+              startIndex: {
+                type: "number",
+                description: "Starting index for pagination (0-based)",
+                minimum: 0,
+              },
+            },
+          },
+          annotations: { readOnlyHint: true, openWorldHint: true },
+          outputSchema: CPE_MATCH_LIST_OUTPUT_SCHEMA,
+        },
       ],
     }));
 
@@ -806,6 +1137,12 @@ class NISTNVDServer {
               return await this.getCVEChangeHistory(request.params.arguments);
             case "search_high_priority_cves":
               return await this.searchHighPriorityCVEs(
+                request.params.arguments,
+              );
+            case "search_cpe_dictionary":
+              return await this.searchCPEDictionary(request.params.arguments);
+            case "search_cpe_match_criteria":
+              return await this.searchCPEMatchCriteria(
                 request.params.arguments,
               );
             default:
@@ -1105,6 +1442,121 @@ class NISTNVDServer {
     };
   }
 
+  private formatCPEResponse(data: NVDResponse, context: string = "") {
+    if (!data.products || data.products.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `No CPE records found${context ? ` ${context}` : ""}.`,
+          },
+        ],
+      };
+    }
+
+    const summary = {
+      search_context: context,
+      total_results: data.totalResults,
+      showing_results: data.products.length,
+      results_per_page: data.resultsPerPage,
+      start_index: data.startIndex,
+      timestamp: data.timestamp,
+    };
+
+    const products = data.products.map((productWrapper) => {
+      const cpe = productWrapper.cpe;
+      return {
+        cpe_name: cpe.cpeName,
+        cpe_name_id: cpe.cpeNameId,
+        deprecated: !!cpe.deprecated,
+        last_modified: cpe.lastModified,
+        created: cpe.created,
+        titles: cpe.titles || [],
+        refs: cpe.refs || [],
+        deprecated_by: cpe.deprecatedBy || [],
+      };
+    });
+
+    const formattedResponse = {
+      summary,
+      products,
+      raw_response_metadata: {
+        format: data.format,
+        version: data.version,
+        has_more_results:
+          data.totalResults > data.startIndex + data.resultsPerPage,
+      },
+    };
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(formattedResponse, null, 2),
+        },
+      ],
+      structuredContent: formattedResponse,
+    };
+  }
+
+  private formatCPEMatchResponse(data: NVDResponse, context: string = "") {
+    if (!data.matchStrings || data.matchStrings.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `No CPE match criteria found${context ? ` ${context}` : ""}.`,
+          },
+        ],
+      };
+    }
+
+    const summary = {
+      search_context: context,
+      total_results: data.totalResults,
+      showing_results: data.matchStrings.length,
+      results_per_page: data.resultsPerPage,
+      start_index: data.startIndex,
+      timestamp: data.timestamp,
+    };
+
+    const matchCriteria = data.matchStrings.map((wrapper) => {
+      const match = wrapper.matchString;
+      const matches = match.matches || [];
+      return {
+        match_criteria_id: match.matchCriteriaId,
+        criteria: match.criteria,
+        status: match.status,
+        created: match.created,
+        last_modified: match.lastModified,
+        cpe_last_modified: match.cpeLastModified,
+        matches_count: matches.length,
+        sample_matches: matches.slice(0, 5),
+      };
+    });
+
+    const formattedResponse = {
+      summary,
+      match_criteria: matchCriteria,
+      raw_response_metadata: {
+        format: data.format,
+        version: data.version,
+        has_more_results:
+          data.totalResults > data.startIndex + data.resultsPerPage,
+      },
+    };
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(formattedResponse, null, 2),
+        },
+      ],
+      structuredContent: formattedResponse,
+    };
+  }
+
   private async searchCVEs(args: any) {
     const params: NVDSearchParams = {};
 
@@ -1123,7 +1575,11 @@ class NISTNVDServer {
     if (args.hasKev) params.hasKev = true;
     if (args.hasCertAlerts) params.hasCertAlerts = true;
     if (args.hasCertNotes) params.hasCertNotes = true;
+    if (args.hasOval) params.hasOval = true;
     if (args.noRejected) params.noRejected = true;
+    if (args.sourceIdentifier)
+      params.sourceIdentifier = String(args.sourceIdentifier);
+    if (args.cveTag) params.cveTag = String(args.cveTag);
 
     // Handle date ranges
     if (args.pubStartDate && args.pubEndDate) {
@@ -1583,10 +2039,85 @@ class NISTNVDServer {
     }
   }
 
+  private async searchCPEDictionary(args: any) {
+    const params: NVDCPESearchParams = {};
+
+    if (args.cpeNameId) params.cpeNameId = String(args.cpeNameId);
+    if (args.cpeMatchString)
+      params.cpeMatchString = String(args.cpeMatchString);
+
+    if (args.keywordSearch) {
+      params.keywordSearch = String(args.keywordSearch);
+      if (args.keywordExactMatch) {
+        params.keywordExactMatch = true;
+      }
+    }
+
+    if (args.matchCriteriaId)
+      params.matchCriteriaId = String(args.matchCriteriaId);
+
+    if (args.lastModStartDate && args.lastModEndDate) {
+      this.validateDateRange(args.lastModStartDate, args.lastModEndDate);
+      params.lastModStartDate = String(args.lastModStartDate);
+      params.lastModEndDate = String(args.lastModEndDate);
+    }
+
+    params.resultsPerPage = Math.min(
+      Number(args.resultsPerPage || 20),
+      10000,
+    );
+    if (args.startIndex) params.startIndex = Number(args.startIndex);
+
+    const data = await this.makeNVDRequestWithRetry("/cpes/2.0", params);
+    const context = params.cpeNameId
+      ? `for CPE Name ID: ${params.cpeNameId}`
+      : params.cpeMatchString
+        ? `for CPE match string: ${params.cpeMatchString}`
+        : params.keywordSearch
+          ? `for keyword: ${params.keywordSearch}`
+          : "in the CPE dictionary";
+    return this.formatCPEResponse(data, context);
+  }
+
+  private async searchCPEMatchCriteria(args: any) {
+    const params: NVDCPEMatchParams = {};
+
+    if (args.matchCriteriaId)
+      params.matchCriteriaId = String(args.matchCriteriaId);
+
+    if (args.cveId) {
+      const cveId = String(args.cveId).toUpperCase();
+      if (!cveId.match(/^CVE-\d{4}-\d{4,}$/)) {
+        throw new ProtocolError(
+          ProtocolErrorCode.InvalidParams,
+          "Invalid CVE ID format. Expected format: CVE-YYYY-NNNN",
+        );
+      }
+      params.cveId = cveId;
+    }
+
+    if (args.lastModStartDate && args.lastModEndDate) {
+      this.validateDateRange(args.lastModStartDate, args.lastModEndDate);
+      params.lastModStartDate = String(args.lastModStartDate);
+      params.lastModEndDate = String(args.lastModEndDate);
+    }
+
+    params.resultsPerPage = Math.min(Number(args.resultsPerPage || 20), 5000);
+    if (args.startIndex) params.startIndex = Number(args.startIndex);
+
+    const data = await this.makeNVDRequestWithRetry("/cpematch/2.0", params);
+    const context = params.matchCriteriaId
+      ? `for Match Criteria ID: ${params.matchCriteriaId}`
+      : params.cveId
+        ? `for ${params.cveId}`
+        : "in the CPE match criteria list";
+    return this.formatCPEMatchResponse(data, context);
+  }
+
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error("NIST NVD MCP server v1.0.0 running on stdio");
+    console.error("NIST NVD MCP server v1.1.0 running on stdio");
   }
 }
 

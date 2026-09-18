@@ -7,10 +7,11 @@ A comprehensive Model Context Protocol (MCP) server providing access to the NIST
 ### Core Capabilities
 - **CVE Search & Retrieval**: Advanced search with keyword, date, severity, and CWE filtering
 - **CPE-Based Searches**: Find vulnerabilities affecting specific products and versions
+- **CPE Dictionary & Match Criteria**: Browse the official CPE Dictionary and inspect the version-range match rules NVD uses to link CVEs to CPEs
 - **CVSS Analysis**: Filter by CVSS v2/v3/v4 scores and severity ratings
 - **Change History Tracking**: Monitor CVE modifications and analysis updates
 - **High-Priority Detection**: Automated discovery of CISA KEV, CERT alerts, and critical CVEs
-- **Comprehensive Filtering**: Date ranges, rejection status, source identifiers, and more
+- **Comprehensive Filtering**: Date ranges, rejection status, source identifiers, CVE tags, and more
 
 ### Advanced Features
 - **Intelligent Caching**: 5-minute TTL with automatic cleanup
@@ -33,6 +34,47 @@ cd nist-nvd-mcp-server
 npm install
 npm run build
 ```
+
+## API Key (Optional, Strongly Recommended)
+
+The NVD API works without a key, but with a much lower rate limit:
+
+| | Without a key | With a free key |
+|---|---|---|
+| Rate limit | 5 requests / 30 seconds | 50 requests / 30 seconds |
+
+Some tools in this server (e.g. `search_high_priority_cves`) fire several requests
+concurrently per call, so an unauthenticated setup can hit the rate limit quickly.
+
+**Get a free key:** Request one at
+[https://nvd.nist.gov/developers/request-an-api-key](https://nvd.nist.gov/developers/request-an-api-key)
+(a valid email address is all that's required; the key arrives by email).
+
+Set it as an environment variable before starting the server:
+
+```bash
+export NVD_API_KEY="your-key-here"
+npm start
+```
+
+Or in your MCP client configuration:
+
+```json
+{
+  "servers": {
+    "nist-nvd": {
+      "command": "node",
+      "args": ["/path/to/nist-nvd-mcp-server/build/index.js"],
+      "env": {
+        "NVD_API_KEY": "your-key-here"
+      }
+    }
+  }
+}
+```
+
+If `NVD_API_KEY` is not set, the server logs a one-time reminder to stderr and
+runs unauthenticated.
 
 ## Quick Start
 
@@ -74,7 +116,10 @@ Search CVEs with comprehensive filtering options.
 - `hasKev` (boolean): CISA Known Exploited Vulnerabilities only
 - `hasCertAlerts` (boolean): US-CERT Technical Alerts only
 - `hasCertNotes` (boolean): CERT/CC Vulnerability Notes only
+- `hasOval` (boolean): Only CVEs with an associated OVAL query
 - `noRejected` (boolean): Exclude rejected CVEs
+- `sourceIdentifier` (string): Filter by the reporting/managing organization (e.g., "cve@mitre.org")
+- `cveTag` (enum): "disputed", "unsupported-when-assigned", or "exclusively-hosted-service"
 - `pubStartDate/pubEndDate` (string): Publication date range (ISO-8601)
 - `lastModStartDate/lastModEndDate` (string): Modification date range
 - `resultsPerPage` (number): 1-2000, default 20
@@ -213,6 +258,46 @@ Find high-priority CVEs using multiple risk indicators.
 }
 ```
 
+### 9. search_cpe_dictionary
+Browse or search the official CPE (Common Platform Enumeration) Dictionary to find
+canonical product/version identifiers.
+
+**Parameters:**
+- `cpeNameId` (string): Return a specific CPE record by its UUID
+- `cpeMatchString` (string): CPEv2.3-format match string (e.g., "cpe:2.3:a:apache:log4j")
+- `keywordSearch` (string): Search CPE titles/references for keywords
+- `keywordExactMatch` (boolean): Exact phrase matching (requires keywordSearch)
+- `matchCriteriaId` (string): Return CPEs tied to a specific Match Criteria UUID
+- `lastModStartDate/lastModEndDate` (string): Modification date range (ISO-8601, max 120 days)
+- `resultsPerPage` (number): 1-10000, default 20
+- `startIndex` (number): Pagination offset
+
+**Example:**
+```json
+{
+  "keywordSearch": "log4j",
+  "resultsPerPage": 10
+}
+```
+
+### 10. search_cpe_match_criteria
+Search the CPE Match Criteria API to see the version-range matching rules NVD
+uses to link CVEs to CPEs.
+
+**Parameters:**
+- `matchCriteriaId` (string): Return a specific Match Criteria record by its UUID
+- `cveId` (string): Return match criteria referenced by a specific CVE
+- `lastModStartDate/lastModEndDate` (string): Modification date range (ISO-8601, max 120 days)
+- `resultsPerPage` (number): 1-5000, default 20
+- `startIndex` (number): Pagination offset
+
+**Example:**
+```json
+{
+  "cveId": "CVE-2021-44228"
+}
+```
+
 ## Response Format
 
 All tools return structured JSON responses with:
@@ -341,8 +426,9 @@ All tools return structured JSON responses with:
 
 ### NIST NVD API Constraints
 - **Date Range Limit**: Maximum 120 consecutive days
-- **Rate Limiting**: Built-in retry logic handles API limits
-- **No API Key Required**: Free access to public data
+- **Rate Limiting**: Built-in retry logic handles API limits; 5 req/30s without a
+  key, 50 req/30s with a free `NVD_API_KEY` (see [API Key](#api-key-optional-strongly-recommended) above)
+- **No API Key Required**: Free access to public data (a key is optional but recommended)
 - **Data Freshness**: Real-time access to official NIST data
 
 ### Optimization Tips
@@ -395,6 +481,12 @@ MIT License - see LICENSE file for details
 - **Community**: [MCP Community](https://github.com/modelcontextprotocol)
 
 ## Version History
+
+### v1.1.0
+- Added optional `NVD_API_KEY` support (50 vs. 5 requests/30s)
+- Added `search_cpe_dictionary` (CPE Dictionary API) and `search_cpe_match_criteria` (CPE Match Criteria API)
+- Wired up previously-unused `sourceIdentifier`, `hasOval`, and `cveTag` parameters on `search_cves`
+- Fixed a live bug where boolean "flag" parameters (`hasKev`, `hasCertAlerts`, `isVulnerable`, etc.) were sent as `?param=true` instead of NVD's required bare-flag format (`?param`), which caused NVD to reject the request with a 404
 
 ### v1.0.0
 - Initial release with full NIST NVD API 2.0 support
